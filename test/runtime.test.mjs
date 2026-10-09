@@ -36,6 +36,8 @@ async function fixture(t, config = {}, { compact, goal = true } = {}) {
     async whenIdle() {},
   };
   agents.register(agent);
+  await drain();
+  assert.equal(agents.get(agent.id), agent, 'registration must settle before goal mutations');
   if (goal) goals.create(agent, { objective: 'In-memory regression fixture' });
   const append = (type, data, ...options) => agents.withInitiator(agent, () => session.append(type, data, ...options));
   const emit = (frame) => agents.withInitiator(agent, () => agentEvents(ctx, agent).emit('agent/assistant-stream', { frame }));

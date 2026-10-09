@@ -13,13 +13,13 @@ DeepSeek Harness 插件：监测 reasoning 中重复的短句，以及单轮步�
 
 界面主要面向桌面 Web。dsh 当前的设置弹窗在很窄的屏幕上可能裁切；插件控件支持换行，但不改写宿主弹窗布局。
 
-设置通过 dsh 的 `reasoning-monitor` 命名空间保存，使用原生配置 API 的逐字段更新与版本冲突检查。保存失败或只读连接会明确提示，不显示假成功。Web 状态读取目前仅支持本机连接；不支持的远程连接会显示错误。
+设置通过 dsh 的 `reasoning-guard` 插件配置行保存，使用原生配置表单的逐字段更新与版本冲突检查。修改实时生效，不重建监控实例或清空已有统计。保存失败或只读连接会明确提示，不显示假成功。Web 状态读取目前仅支持本机连接；不支持的远程连接会显示错误。
 
 处置记录保留在本次插件运行的内存中，每个 agent 最多 5 条，设置页展示最近 10 条。重启或 agent 卸载会清除记录；接口不返回思考原文。统计从插件接收到的新事件开始，不回放历史会话。
 
 ## 安装
 
-要求 Node.js 22+；适配 dsh `0.1.5-rc.2` 组件。先克隆仓库并安装运行依赖：
+要求 Node.js 22+；本插件 `0.6.0` 适配 dsh `0.2.0-rc.2`。旧版 dsh 请保留插件 `0.5.0`；本版不声明支持 `0.2.1-alpha.1`。先克隆仓库并安装运行依赖：
 
 ```sh
 git clone https://github.com/Anonymousnake/dsh-reasoning-monitor.git
@@ -46,6 +46,23 @@ npm ci --omit=dev --ignore-scripts
 
 Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 仍可使用检测和命令；没有 settings 服务时使用插件入口配置。
 
+## 从插件 0.5.0 升级
+
+升级前备份 `$DSH_HOME/settings.yaml` 和 profile 的 `cordis.patch.yml`。DSH 0.2 的设置按插件配置行保存，本插件继续使用 **`reasoning-guard`** 行 ID，原有 profile 覆盖无需改名。
+
+插件 0.5.0 设置页曾将值存入 `$DSH_HOME/settings.yaml` 的 `reasoning-monitor` 段。升级前把该段中需要保留的字段复制到目标 profile 的 `reasoning-guard.config`，与已有字段合并；不要覆盖整份 profile。若 DSH 已迁移旧设置文件，可在 `settings.yaml.imported` 中找到原段。宿主不会自动把 `reasoning-monitor` 段映射到 `reasoning-guard` 行，本插件不改写这份历史文件。
+
+例如原段为 `reasoning-monitor: { enabled: false, repeatedRunLimit: 44 }`，对应的 profile 覆盖为：
+
+```yaml
+- id: reasoning-guard
+  config:
+    enabled: false
+    repeatedRunLimit: 44
+```
+
+升级 DSH 并更新插件后重启对应实例、刷新浏览器，再在“设置 → 思考监控”核对开关与阈值。新的设置写入该 profile 的 `cordis.patch.yml`，可随 profile 一起备份。
+
 ## 从旧名称升级
 
 1. 将 profile 的依赖键和 bundle 名从 `dsh-reasoning-guard` 改为 `dsh-reasoning-monitor`，链接到更新后的本地目录；不要同时加载两份插件。
@@ -65,7 +82,7 @@ Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 
 
 ## 配置
 
-推荐通过设置页修改。解析优先级为：内置默认值 → profile 的插件入口配置 → dsh settings 中的用户配置。后者持久化并实时生效；删除相应用户配置字段后重新继承入口配置。
+推荐通过设置页修改。解析优先级为：内置默认值 → bundle 的插件入口配置 → profile 中的配置覆盖。设置页写入 profile 覆盖并实时生效；清除覆盖字段后重新继承入口配置。
 
 插件自带配置见 `cordis.patch.yml`，可在 profile 的 `cordis.patch.yml` 中覆盖（行 ID 为兼容旧配置保留）：
 
@@ -107,13 +124,15 @@ Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 
 
 ```sh
 npm ci --ignore-scripts       # 开发测试依赖，Node 24
-npm test                     # 检测、恢复、动态配置、真实 settings 与本机状态接口测试
+npm test                     # 检测、恢复、真实 Loader/Settings、配置表单保存与本机状态接口测试
 node test/dryrun.mjs            # 模拟事件、隔离服务、idle 压缩和 goal 恢复
 node test/verify.mjs            # 回放本机历史会话（需要会话数据）
 node test/audit.mjs <会话片段>  # 检查一个会话中匹配的短句
 ```
 
 `verify.mjs` 依赖当前 Node 的 Zstandard 解压能力；它只读 `~/.dsh/sessions`，回放已落盘 reasoning，冷却置零，不执行处置，也不模拟实时流和时长预算。其“触发/未触发”是规则输出，未经人工标注，不能用来声称零误报或零漏报。判定不代表对 reasoning 内容质量的通用评估。
+
+配置测试在临时 DSH home 中运行官方 `0.2.0-rc.2` Loader、ConfigEditor 和 SettingsForms，验证持久化、修订冲突、无效配置不落盘、实时更新保留实例及重启恢复。客户端测试在 Node 中检查原生表单返回成功或失败时的处理，不能替代浏览器视觉验收。目标恢复测试使用真实 Session/Goal 服务和可控 Agent；不消耗模型额度，不修改用户会话。
 
 `ci/github-actions-test.yml` 是 Ubuntu/Windows 的 GitHub Actions 模板，当前不自动运行。有工作流写入权限时，可将它放到 `.github/workflows/test.yml` 启用。
 
