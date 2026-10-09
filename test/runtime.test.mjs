@@ -11,7 +11,7 @@ import * as guard from '../lib/index.js';
 
 const drain = () => new Promise((resolve) => setImmediate(resolve));
 let fixtureId = 0;
-async function fixture(t, config = {}, { compact, goal = true } = {}) {
+async function fixture(t, config = {}, { compact, goal = true, goalService = true } = {}) {
   const ctx = new Context();
   t.after(() => ctx.fiber.dispose());
   let statusTool, command;
@@ -22,8 +22,10 @@ async function fixture(t, config = {}, { compact, goal = true } = {}) {
   ctx.plugin(AgentRegistry);
   ctx.plugin(SessionStore);
   ctx.plugin(SessionProjectionRegistry);
-  ctx.plugin(GoalService);
-  ctx.plugin(driver);
+  if (goalService) {
+    ctx.plugin(GoalService);
+    ctx.plugin(driver);
+  }
   const guardFiber = ctx.plugin(guard, { cooldownMs: 0, maxStepsPerTurn: 0, maxTurnMinutes: 0, autoCompact: false, ...config });
   await drain();
   const agents = ctx.get('agents'), goals = ctx.get('goals');
@@ -103,6 +105,73 @@ test('live stream triggers before settlement and counts its final message only o
   assert.equal(report.fired, 1);
 });
 
+test('default action interrupts a live turn without a goal and compacts once after idle', async (t) => {
+  let compactCalls = 0;
+  const f = await fixture(t, { autoCompact: true }, { goal: false, compact(agent) {
+    assert.equal(agent.phase.kind, 'idle');
+    compactCalls++;
+    return Promise.resolve({ shadowedTokenCount: 100 });
+  } });
+  f.emit({ type: 'start', attemptId: 'no-goal', turn: 1, step: 1 });
+  f.emit({ type: 'chunk', attemptId: 'no-goal', index: 0,
+    chunk: { type: 'reasoning-delta', index: 0, text: '好。'.repeat(80) } });
+  await drain();
+  assert.deepEqual(f.cancellations, [{ cause: { kind: 'parent' }, options: { keepInbox: true } }]);
+  assert.equal(compactCalls, 0, 'compaction must wait for cancellation to reach idle');
+  assert.equal(f.monitor.getSnapshot().agents[0].events[0].phase, 'waiting');
+  f.settle('好。'.repeat(80));
+  await drain();
+  assert.equal(f.cancellations.length, 1, 'settlement must not cancel a second time');
+  f.idle();
+  await drain();
+  const event = f.monitor.getSnapshot().agents[0].events[0];
+  assert.equal(compactCalls, 1);
+  assert.equal(event.cancelled, true);
+  assert.equal(event.paused, false);
+  assert.equal(event.resumed, false);
+  assert.equal(event.compaction, 'succeeded');
+  assert.deepEqual(event.errors, []);
+  f.idle();
+  assert.equal(compactCalls, 1);
+});
+
+test('default action interrupts even when the goal service is unavailable', async (t) => {
+  const f = await fixture(t, {}, { goal: false, goalService: false });
+  assert.equal(f.goals, undefined);
+  f.settle('好。'.repeat(80));
+  await drain();
+  assert.equal(f.cancellations.length, 1);
+  const event = f.monitor.getSnapshot().agents[0].events[0];
+  assert.equal(event.paused, false);
+  assert.equal(event.cancelled, true);
+  assert.deepEqual(event.errors, []);
+});
+
+test('a failed goal pause does not suppress interruption', async (t) => {
+  const f = await fixture(t);
+  t.mock.method(f.goals, 'pause', () => { throw new Error('fixture pause failure'); });
+  f.settle('好。'.repeat(80));
+  await drain();
+  assert.equal(f.cancellations.length, 1);
+  const event = f.monitor.getSnapshot().agents[0].events[0];
+  assert.equal(event.paused, false);
+  assert.equal(event.cancelled, true);
+  assert.deepEqual(event.errors, ['pause-failed']);
+});
+
+test('warn without a goal leaves generation running and compacts only after idle', async (t) => {
+  let compactCalls = 0;
+  const f = await fixture(t, { action: 'warn', autoCompact: true }, { goal: false,
+    compact: async () => { compactCalls++; return { shadowedTokenCount: 100 }; } });
+  f.settle('好。'.repeat(80));
+  await drain();
+  assert.equal(f.cancellations.length, 0);
+  assert.equal(compactCalls, 0);
+  f.idle();
+  await drain();
+  assert.equal(compactCalls, 1);
+});
+
 test('complete reasoning blocks without deltas are detected; unrelated frames are ignored', async (t) => {
   const f = await fixture(t, { action: 'cancel' }, { goal: false });
   f.emit({ type: 'start', attemptId: 'attempt-1', turn: 1, step: 1 });
@@ -115,7 +184,7 @@ test('complete reasoning blocks without deltas are detected; unrelated frames ar
 });
 
 test('elapsed budget fires during a stalled first step with no new events', async (t) => {
-  const f = await fixture(t, { maxTurnMinutes: 0.0005, action: 'cancel' }, { goal: false });
+  const f = await fixture(t, { maxTurnMinutes: 0.0005 }, { goal: false });
   f.append('turn/start', { turn: 1 });
   f.append('step/start', { turn: 1, step: 1 });
   await new Promise((resolve) => setTimeout(resolve, 65));

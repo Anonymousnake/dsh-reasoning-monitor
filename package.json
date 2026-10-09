@@ -1,6 +1,6 @@
 {
   "name": "dsh-reasoning-monitor",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "思考监控 / Reasoning Monitor for DeepSeek Harness: live repetition detection, turn budgets, recovery, and Web settings.",
   "type": "module",
   "main": "lib/index.js",
