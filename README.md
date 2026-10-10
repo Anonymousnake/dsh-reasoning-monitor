@@ -13,13 +13,13 @@ DeepSeek Harness 插件：监测 reasoning 中重复的短句，以及单轮步�
 
 界面主要面向桌面 Web。dsh 当前的设置弹窗在很窄的屏幕上可能裁切；插件控件支持换行，但不改写宿主弹窗布局。
 
-设置通过 dsh 的 `reasoning-monitor` 命名空间保存，使用原生配置 API 的逐字段更新与版本冲突检查。保存失败或只读连接会明确提示，不显示假成功。Web 状态读取目前仅支持本机连接；不支持的远程连接会显示错误。
+设置通过 dsh 的 `reasoning-guard` 插件配置行保存，使用原生配置表单的逐字段更新与版本冲突检查。修改实时生效，不重建监控实例或清空已有统计。保存失败或只读连接会明确提示，不显示假成功。Web 状态读取目前仅支持本机连接；不支持的远程连接会显示错误。
 
 处置记录保留在本次插件运行的内存中，每个 agent 最多 5 条，设置页展示最近 10 条。重启或 agent 卸载会清除记录；接口不返回思考原文。统计从插件接收到的新事件开始，不回放历史会话。
 
 ## 安装
 
-要求 Node.js 22+；适配 dsh `0.1.5-rc.2` 组件。先克隆仓库并安装运行依赖：
+要求 Node.js 22+；本插件 `0.6.1` 适配 dsh `0.2.0-rc.2`。旧版 dsh 请保留插件 `0.5.0`；本版不声明支持 `0.2.1-alpha.1`。先克隆仓库并安装运行依赖：
 
 ```sh
 git clone https://github.com/Anonymousnake/dsh-reasoning-monitor.git
@@ -46,6 +46,23 @@ npm ci --omit=dev --ignore-scripts
 
 Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 仍可使用检测和命令；没有 settings 服务时使用插件入口配置。
 
+## 从插件 0.5.0 升级
+
+升级前备份 `$DSH_HOME/settings.yaml` 和 profile 的 `cordis.patch.yml`。DSH 0.2 的设置按插件配置行保存，本插件继续使用 **`reasoning-guard`** 行 ID，原有 profile 覆盖无需改名。
+
+插件 0.5.0 设置页曾将值存入 `$DSH_HOME/settings.yaml` 的 `reasoning-monitor` 段。升级前把该段中需要保留的字段复制到目标 profile 的 `reasoning-guard.config`，与已有字段合并；不要覆盖整份 profile。若 DSH 已迁移旧设置文件，可在 `settings.yaml.imported` 中找到原段。宿主不会自动把 `reasoning-monitor` 段映射到 `reasoning-guard` 行，本插件不改写这份历史文件。
+
+例如原段为 `reasoning-monitor: { enabled: false, repeatedRunLimit: 44 }`，对应的 profile 覆盖为：
+
+```yaml
+- id: reasoning-guard
+  config:
+    enabled: false
+    repeatedRunLimit: 44
+```
+
+升级 DSH 并更新插件后重启对应实例、刷新浏览器，再在“设置 → 思考监控”核对开关与阈值。新的设置写入该 profile 的 `cordis.patch.yml`，可随 profile 一起备份。
+
 ## 从旧名称升级
 
 1. 将 profile 的依赖键和 bundle 名从 `dsh-reasoning-guard` 改为 `dsh-reasoning-monitor`，链接到更新后的本地目录；不要同时加载两份插件。
@@ -60,12 +77,12 @@ Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 
 - 按换行、句号和问叹号等分隔短句，兼容 `（好）。`、`- 好。` 和同一行的 `好。好。`。固定行动词的数量须同时满足占比阈值，或单块连续长度达到阈值；词表外长度不超过 80 字符的相同短句连续重复 30 次也会触发。普通长任务中的零散行动词不会仅因总数达到阈值被认定为退化。
 - 滑动窗口与累计证据在新 turn 和压缩结算时清空。`step/start` 检查步数；从 `turn/start` 启动独立计时器，即使当前请求不再输出或开始下一步，时长预算也能触发。超预算只说明超过配置上限，不等于任务没有进展。
 - `autoCompact: true` 时，通过 `agentPresets.serviceFor(agent, 'compaction')` 寻址当前 agent 所属 preset 的隔离压缩服务；非 preset 部署可使用 host 服务。手动压缩只接受 idle agent 和有效的 `AbortSignal`。
-- 处置放在事件发布结束后的微任务中，避免嵌套写入 `goal/change` 被 dsh 拒绝。`pause-goal` 暂停 active goal 后明确取消当前轮，保留排队中的用户消息；agent 到达 idle 后发起一次压缩，结算后按新的 goal revision 恢复自动续轮。禁用压缩或服务缺失时也等 idle 后恢复。`warn` 等轮次自然结束，`cancel` 保持 goal 暂停。暂停或取消失败始终输出告警。
+- 处置放在事件发布结束后的微任务中，避免嵌套写入 `goal/change` 被 dsh 拒绝。`pause-goal` 无论是否存在 active goal 都明确取消当前轮，保留排队中的用户消息；有 active goal 时额外尝试暂停。agent 到达 idle 后发起一次压缩，结算后按新的 goal revision 恢复已暂停的目标。禁用压缩或服务缺失时也等 idle 后恢复。目标暂停失败会保留错误记录，但不阻止中断。`warn` 等轮次自然结束，`cancel` 保持 goal 暂停。暂停或取消失败始终输出告警。
 - 同一 agent 的重复触发在待压缩或压缩运行期间合并。超时会请求取消压缩，并让 goal 恢复；压缩失败或没有可压缩范围也计入失败次数。压缩结果取决于上下文是否存在可收缩范围，不能保证每次都会缩减。
 
 ## 配置
 
-推荐通过设置页修改。解析优先级为：内置默认值 → profile 的插件入口配置 → dsh settings 中的用户配置。后者持久化并实时生效；删除相应用户配置字段后重新继承入口配置。
+推荐通过设置页修改。解析优先级为：内置默认值 → bundle 的插件入口配置 → profile 中的配置覆盖。设置页写入 profile 覆盖并实时生效；清除覆盖字段后重新继承入口配置。
 
 插件自带配置见 `cordis.patch.yml`，可在 profile 的 `cordis.patch.yml` 中覆盖（行 ID 为兼容旧配置保留）：
 
@@ -93,11 +110,11 @@ Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 
 
 | `action` | 触发后的行为 |
 | --- | --- |
-| `pause-goal` | 暂停 active goal 并取消当前轮，idle 后压缩，随后恢复；默认值。 |
+| `pause-goal` | 取消当前轮；有 active goal 时额外暂停，idle 后压缩，按恢复设置处理目标；默认值。 |
 | `warn` | 仅告警；启用自动压缩时，等待当前轮次自然结束。 |
 | `cancel` | 暂停 active goal 并取消当前轮次；保留暂停状态。 |
 
-没有 active goal 时，`pause-goal` 不会主动取消当前轮次；若启用压缩，它等待自然到达 idle。`resumeGoal: false` 会让 `pause-goal` 的暂停状态保持不变。`intervene` 使用可选的 `@deepseek-ai/dsh-llm` 消息工厂，缺失时使用本地消息结构。
+从 `0.6.1` 起，没有 active goal 或目标服务不可用时，`pause-goal` 也会中断当前轮次；启用压缩后，等待取消完成、agent 到达 idle 再压缩。压缩无法与生成并发执行。`resumeGoal: false` 会让 `pause-goal` 成功暂停的目标保持暂停；没有目标时不会创建或恢复目标。原有 `action: pause-goal` 配置无需迁移。`intervene` 使用可选的 `@deepseek-ai/dsh-llm` 消息工厂，缺失时使用本地消息结构。
 
 关闭监控会停止新检测和预算计时器，也会撤销尚未开始的处置。已经开始的处置按触发时的压缩超时及恢复策略收尾，避免更改开关或恢复设置后遗留被暂停的目标。重新启用无需重载插件；运行中的预算会重新按新配置计时检查。
 
@@ -107,13 +124,15 @@ Web 客户端通过包的 `dsh.client` 声明加载。无 Web 界面的 profile 
 
 ```sh
 npm ci --ignore-scripts       # 开发测试依赖，Node 24
-npm test                     # 检测、恢复、动态配置、真实 settings 与本机状态接口测试
+npm test                     # 检测、恢复、真实 Loader/Settings、配置表单保存与本机状态接口测试
 node test/dryrun.mjs            # 模拟事件、隔离服务、idle 压缩和 goal 恢复
 node test/verify.mjs            # 回放本机历史会话（需要会话数据）
 node test/audit.mjs <会话片段>  # 检查一个会话中匹配的短句
 ```
 
 `verify.mjs` 依赖当前 Node 的 Zstandard 解压能力；它只读 `~/.dsh/sessions`，回放已落盘 reasoning，冷却置零，不执行处置，也不模拟实时流和时长预算。其“触发/未触发”是规则输出，未经人工标注，不能用来声称零误报或零漏报。判定不代表对 reasoning 内容质量的通用评估。
+
+配置测试在临时 DSH home 中运行官方 `0.2.0-rc.2` Loader、ConfigEditor 和 SettingsForms，验证持久化、修订冲突、无效配置不落盘、实时更新保留实例及重启恢复。客户端测试在 Node 中检查原生表单返回成功或失败时的处理，不能替代浏览器视觉验收。目标恢复测试使用真实 Session/Goal 服务和可控 Agent；不消耗模型额度，不修改用户会话。
 
 `ci/github-actions-test.yml` 是 Ubuntu/Windows 的 GitHub Actions 模板，当前不自动运行。有工作流写入权限时，可将它放到 `.github/workflows/test.yml` 启用。
 

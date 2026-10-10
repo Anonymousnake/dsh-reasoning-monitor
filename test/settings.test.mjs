@@ -1,47 +1,65 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Context } from '@deepseek-ai/cordis';
-import { SettingsProvider } from '@deepseek-ai/dsh-settings';
-import * as monitorPlugin from '../lib/index.js';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import { boot, loadProfileDirectory } from '@deepseek-ai/dsh-app-boot';
 import { stateHandler } from '../lib/settings.js';
 
-const drain = () => new Promise(resolve => setImmediate(resolve));
+const require = createRequire(import.meta.url);
 
-test('real settings preserve base values, validate patches, fence revisions and reload stored values', async (t) => {
-  const document = { 'reasoning-monitor': { repeatedRunLimit: 44 } };
-  class MemorySettings extends SettingsProvider {
-    writable = true;
-    async load() { return structuredClone(document); }
-    async persist(ns, value) { document[ns] = structuredClone(value); }
-  }
-  const ctx = new Context();
-  t.after(() => ctx.fiber.dispose());
-  ctx.provide('agents', { list: () => [] });
-  ctx.provide('tools', { register() {} });
-  ctx.plugin(MemorySettings);
-  const config = { perBlockLimit: 88 };
-  let fiber = ctx.plugin(monitorPlugin, config);
-  await drain(); await drain();
+test('real profile settings validate, persist and apply live without replacing the monitor', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'reasoning-monitor-'));
+  assert.ok(home.startsWith(join(tmpdir(), 'reasoning-monitor-')));
+  const dir = join(home, 'profiles', 'web');
+  await mkdir(dir, { recursive: true });
+  const patchPath = join(dir, 'cordis.patch.yml');
+  const configPath = join(dir, 'cordis.yml');
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: [] } } }));
+  await writeFile(configPath, '[]\n');
+  const patches = [{ insert: [
+    { id: 'config-editor', name: pathToFileURL(require.resolve('@deepseek-ai/dsh-config-editor')).href },
+    { id: 'settings', name: pathToFileURL(require.resolve('@deepseek-ai/dsh-settings')).href },
+    { id: 'reasoning-guard', name: new URL('../lib/index.js', import.meta.url).href,
+      config: { perBlockLimit: 88, repeatedRunLimit: 44 } },
+  ] }];
+  await writeFile(patchPath, JSON.stringify(patches));
+  const start = () => boot('monitor-test', configPath,
+    loadProfileDirectory('monitor-test', dir, require.resolve('../package.json')).patches, ctx => {
+    ctx.provide('profileContext', { name: 'fixture', dir, home, patchPath,
+      installAnchor: require.resolve('../package.json'), cwd: home, startedBundles: [], overlays: [] });
+    ctx.provide('agents', { list: () => [] });
+    ctx.provide('tools', { register() {} });
+  });
+  let ctx;
+  t.after(async () => { await ctx?.fiber.dispose(); await rm(home, { recursive: true }); });
+  ctx = await start();
   const settings = ctx.get('settings');
-  let monitor = ctx.get('reasoningMonitor');
+  const monitor = ctx.get('reasoningMonitor');
   assert.equal(monitor.getSnapshot().config.repeatedRunLimit, 44);
   assert.equal(monitor.getSnapshot().config.perBlockLimit, 88);
-  const revision = settings.describe({ redactSecrets: true })[0].revision;
-  await settings.update('reasoning-monitor', { enabled: false }, revision);
+  const descriptor = settings.describe({ redactSecrets: true }).find(row => row.ns === 'reasoning-guard');
+  assert.equal(descriptor.autoGenerate, false, 'the custom page owns presentation');
+  const revision = descriptor.revision;
+  await settings.update('reasoning-guard', { enabled: false }, revision);
   assert.equal(monitor.getSnapshot().config.enabled, false);
-  assert.equal(document['reasoning-monitor'].repeatedRunLimit, 44, 'partial write preserves unrelated fields');
-  await assert.rejects(settings.update('reasoning-monitor', { verbose: true }, revision), { code: 'SETTINGS_CONFLICT' });
-  await assert.rejects(settings.update('reasoning-monitor', { repeatedRunLimit: -1 }));
-  await assert.rejects(settings.update('reasoning-monitor', { minChantRatio: 0 }));
-  await assert.rejects(settings.update('reasoning-monitor', { action: 'unknown' }));
-  await fiber.dispose();
-  fiber = ctx.plugin(monitorPlugin, config);
-  await drain(); await drain();
-  monitor = ctx.get('reasoningMonitor');
-  assert.equal(monitor.getSnapshot().config.enabled, false);
+  assert.equal(ctx.get('reasoningMonitor'), monitor, 'live saves must retain monitoring state');
   assert.equal(monitor.getSnapshot().config.repeatedRunLimit, 44);
-  await settings.update('reasoning-monitor', { enabled: true });
+  await assert.rejects(settings.update('reasoning-guard', { verbose: true }, revision), { code: 'SETTINGS_CONFLICT' });
+  const persisted = await readFile(patchPath, 'utf8');
+  await assert.rejects(settings.update('reasoning-guard', { repeatedRunLimit: -1 }));
+  await assert.rejects(settings.update('reasoning-guard', { minChantRatio: 0 }));
+  await assert.rejects(settings.update('reasoning-guard', { action: 'unknown' }));
+  assert.equal(await readFile(patchPath, 'utf8'), persisted, 'invalid edits must not alter the profile');
+  await settings.update('reasoning-guard', { enabled: true });
   assert.equal(monitor.getSnapshot().config.enabled, true);
+  await settings.update('reasoning-guard', { enabled: false, repeatedRunLimit: 55 });
+  await ctx.fiber.dispose();
+  ctx = await start();
+  assert.equal(ctx.get('reasoningMonitor').getSnapshot().config.enabled, false);
+  assert.equal(ctx.get('reasoningMonitor').getSnapshot().config.repeatedRunLimit, 55);
 });
 
 test('status endpoint is read-only and restricted to local same-site requests', () => {
